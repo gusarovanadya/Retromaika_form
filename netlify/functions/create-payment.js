@@ -259,7 +259,12 @@ async function createTbankPayment({ terminalKey, secretKey, amount, orderId, des
     });
     const data = await res.json();
     if (!res.ok || !data.Success) {
-      throw new Error(data.Message || data.Details || `Т-банк HTTP ${res.status}`);
+      const err = new Error(data.Message || data.Details || `Т-банк HTTP ${res.status}`);
+      err.tbankErrorCode = data.ErrorCode;
+      err.tbankMessage   = data.Message;
+      err.tbankDetails   = data.Details;
+      err.httpStatus     = res.status;
+      throw err;
     }
     return data.PaymentURL;
   } finally {
@@ -288,10 +293,14 @@ exports.handler = async (event) => {
     const proto   = event.headers['x-forwarded-proto'] || 'https';
     const baseUrl = proto + '://' + host.replace(/\/$/, '');
 
-    if (!botToken || !chatId) {
-      console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing Telegram env vars' }));
-      return json(500, { error: 'Ошибка конфигурации сервера', requestId });
-    }
+    console.log(JSON.stringify({
+      level: 'info', stage: 'config', requestId,
+      hasTbankTerminalKey:  !!terminalKey,
+      hasTbankSecretKey:    !!secretKey,
+      hasTelegramBotToken:  !!botToken,
+      hasTelegramChatId:    !!chatId,
+    }));
+
     if (!terminalKey || !secretKey) {
       console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing Tbank env vars' }));
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
@@ -341,9 +350,20 @@ exports.handler = async (event) => {
     msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
     const msgEn = msgEnLines.join('\n');
 
-    // Отправляем оба сообщения в Telegram
-    await sendTelegram(botToken, chatId, msgRu);
-    await sendTelegram(botToken, chatId, msgEn);
+    // Отправляем оба сообщения в Telegram — необязательно, не блокирует оплату
+    if (botToken && chatId) {
+      try {
+        await sendTelegram(botToken, chatId, msgRu);
+        await sendTelegram(botToken, chatId, msgEn);
+      } catch (tgErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'telegram',
+          requestId, message: tgErr.message,
+        }));
+      }
+    } else {
+      console.log(JSON.stringify({ level: 'info', stage: 'telegram', requestId, message: 'Telegram not configured, skipping' }));
+    }
 
     console.log(JSON.stringify({
       level: 'info', stage: 'create-payment',
@@ -354,8 +374,15 @@ exports.handler = async (event) => {
 
   } catch (error) {
     console.error(JSON.stringify({
-      level: 'error', stage: 'exception',
-      requestId, message: error.message, stack: error.stack,
+      level:          'error',
+      stage:          'exception',
+      requestId,
+      message:        error.message,
+      tbankErrorCode: error.tbankErrorCode || undefined,
+      tbankMessage:   error.tbankMessage   || undefined,
+      tbankDetails:   error.tbankDetails   || undefined,
+      httpStatus:     error.httpStatus     || undefined,
+      stack:          error.stack,
     }));
     return json(500, { error: 'Внутренняя ошибка сервера', requestId });
   }
