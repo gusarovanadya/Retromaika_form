@@ -1,10 +1,19 @@
 // netlify/functions/create-payment.js
 //
-// Netlify Environment Variables (Site settings → Environment variables):
-//   TELEGRAM_BOT_TOKEN   — токен бота от BotFather
-//   TELEGRAM_CHAT_ID     — ваш chat_id
-//   TBANK_TERMINAL_KEY   — TerminalKey из личного кабинета Т-банка
-//   TBANK_SECRET_KEY     — SecretKey (пароль) из личного кабинета Т-банка
+// Required env vars (Netlify → Site settings → Environment variables):
+//   TBANK_TERMINAL_KEY       — TerminalKey from T-Bank merchant portal
+//   TBANK_SECRET_KEY         — SecretKey (password) from T-Bank merchant portal
+//   TBANK_SUCCESS_URL        — e.g. https://retromaikaform.netlify.app/success.html
+//   TBANK_FAIL_URL           — e.g. https://retromaikaform.netlify.app/fail.html
+//   TBANK_NOTIFICATION_URL   — e.g. https://retromaikaform.netlify.app/.netlify/functions/tbank-webhook
+//
+// Optional env vars (receipt / Telegram):
+//   TBANK_TAXATION           — default "usn_income"
+//   TBANK_TAX                — default "none"
+//   TBANK_PAYMENT_METHOD     — default "full_prepayment"
+//   TBANK_PAYMENT_OBJECT     — default "commodity"
+//   TELEGRAM_BOT_TOKEN
+//   TELEGRAM_CHAT_ID
 
 const crypto = require('crypto');
 
@@ -33,9 +42,7 @@ function translit(str) {
 }
 
 // ── Словарь официальных английских названий городов ──────────
-// Для городов не в словаре → автоматически используется ГОСТ транслит
 const CITY_EN = {
-  // Города-миллионники и крупные
   'москва': 'Moscow',
   'санкт-петербург': 'Saint Petersburg',
   'санкт петербург': 'Saint Petersburg',
@@ -56,7 +63,6 @@ const CITY_EN = {
   'пермь': 'Perm',
   'волгоград': 'Volgograd',
   'краснодар': 'Krasnodar',
-  // Крупные города
   'саратов': 'Saratov',
   'тюмень': 'Tyumen',
   'тольятти': 'Tolyatti',
@@ -122,7 +128,6 @@ const CITY_EN = {
   'балашиха': 'Balashikha',
   'химки': 'Khimki',
   'подольск': 'Podolsk',
-  'красноярск': 'Krasnoyarsk',
   'волгодонск': 'Volgodonsk',
   'таганрог': 'Taganrog',
   'комсомольск-на-амуре': 'Komsomolsk-on-Amur',
@@ -133,15 +138,13 @@ const CITY_EN = {
   'мытищи': 'Mytishchi',
 };
 
-function cityToEn(city) {
-  const key = String(city || '').trim().toLowerCase();
-  if (CITY_EN[key]) return CITY_EN[key];
-  // Fallback: ГОСТ транслит с заглавной буквы каждого слова
-  return capitalizeWords(translit(city));
-}
-
 function capitalizeWords(str) {
   return String(str || '').replace(/\b([a-zA-Z])([a-zA-Z]*)/g, (_, f, r) => f.toUpperCase() + r);
+}
+
+function cityToEn(city) {
+  const key = String(city || '').trim().toLowerCase();
+  return CITY_EN[key] || capitalizeWords(translit(city));
 }
 
 // ── Очистка адреса от сокращений ─────────────────────────────
@@ -155,7 +158,6 @@ function cleanAddressForEn(str) {
 
   let result = String(str || '');
   prefixes.forEach(p => {
-    // (^|\s) вместо lookbehind — работает во всех браузерах и Node
     const re = new RegExp('(^|\\s)' + p.replace(/[-]/g, '\\-') + '\\.?(?=\\s|$)', 'gi');
     result = result.replace(re, '$1');
   });
@@ -202,8 +204,8 @@ function validate(body) {
 }
 
 // ── Подпись для Т-банк API (SHA-256) ─────────────────────────
-// Алгоритм: берём все параметры кроме Token и Receipt,
-// добавляем Password, сортируем по ключу, конкатенируем значения, SHA-256
+// Алгоритм: все верхнеуровневые параметры кроме Token, Receipt, DATA,
+// добавить Password, отсортировать по ключу, склеить значения, SHA-256
 function makeTbankToken(params, secretKey) {
   const filtered = Object.assign({}, params, { Password: secretKey });
   delete filtered.Token;
@@ -211,7 +213,7 @@ function makeTbankToken(params, secretKey) {
   delete filtered.DATA;
 
   const sortedKeys = Object.keys(filtered).sort();
-  const str = sortedKeys.map(k => filtered[k]).join('');
+  const str = sortedKeys.map(k => String(filtered[k])).join('');
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
@@ -233,20 +235,43 @@ async function sendTelegram(botToken, chatId, text) {
   }
 }
 
-// ── Создание платежа в Т-банке ────────────────────────────────
-async function createTbankPayment({ terminalKey, secretKey, amount, orderId, description, baseUrl }) {
-  const amountKopecks = Math.round(amount * 100); // Т-банк принимает копейки
+// ── Создание платежа в Т-банке (ФФД 1.05) ────────────────────
+async function createTbankPayment({
+  terminalKey, secretKey,
+  amount, orderId, description,
+  successUrl, failUrl, notificationUrl,
+  phone, taxation, paymentMethod, paymentObject, tax,
+}) {
+  const amountKopecks = Math.round(amount * 100);
 
+  // Верхнеуровневые параметры — участвуют в подписи
   const params = {
-    TerminalKey: terminalKey,
-    Amount:      amountKopecks,
-    OrderId:     orderId,
-    Description: description,
-    SuccessURL:  baseUrl + '/success',
-    FailURL:     baseUrl + '/fail',
+    TerminalKey:     terminalKey,
+    Amount:          amountKopecks,
+    OrderId:         orderId,
+    Description:     description.slice(0, 140),
+    PayType:         'O',
+    SuccessURL:      successUrl,
+    FailURL:         failUrl,
+    NotificationURL: notificationUrl,
   };
 
   params.Token = makeTbankToken(params, secretKey);
+
+  // Receipt добавляем ПОСЛЕ расчёта подписи — не входит в Token
+  params.Receipt = {
+    Phone:    cleanPhone(phone),
+    Taxation: taxation,
+    Items: [{
+      Name:          'Футбольная атрибутика Retromaika',
+      Price:         amountKopecks,
+      Quantity:      1,
+      Amount:        amountKopecks,
+      PaymentMethod: paymentMethod,
+      PaymentObject: paymentObject,
+      Tax:           tax,
+    }],
+  };
 
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), 10000);
@@ -280,78 +305,98 @@ exports.handler = async (event) => {
   const idempotencyKey = event.headers['idempotency-key'] || '';
 
   try {
-    const body           = JSON.parse(event.body || '{}');
+    const body            = JSON.parse(event.body || '{}');
     const validationError = validate(body);
     if (validationError) return json(400, { error: validationError, requestId });
 
-    const botToken    = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId      = process.env.TELEGRAM_CHAT_ID;
-    const terminalKey = process.env.TBANK_TERMINAL_KEY;
-    const secretKey   = process.env.TBANK_SECRET_KEY;
-    // baseUrl строится из заголовка запроса — никакой переменной не нужно
-    const host    = event.headers['x-forwarded-host'] || event.headers['host'] || '';
-    const proto   = event.headers['x-forwarded-proto'] || 'https';
-    const baseUrl = proto + '://' + host.replace(/\/$/, '');
+    const terminalKey     = process.env.TBANK_TERMINAL_KEY;
+    const secretKey       = process.env.TBANK_SECRET_KEY;
+    const successUrl      = process.env.TBANK_SUCCESS_URL      || '';
+    const failUrl         = process.env.TBANK_FAIL_URL         || '';
+    const notificationUrl = process.env.TBANK_NOTIFICATION_URL || '';
+    const taxation        = process.env.TBANK_TAXATION         || 'usn_income';
+    const tax             = process.env.TBANK_TAX              || 'none';
+    const paymentMethod   = process.env.TBANK_PAYMENT_METHOD   || 'full_prepayment';
+    const paymentObject   = process.env.TBANK_PAYMENT_OBJECT   || 'commodity';
+    const botToken        = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId          = process.env.TELEGRAM_CHAT_ID;
+
+    // OrderId: UUID из заголовка, до 36 символов
+    const orderId = requestId.slice(0, 36);
+
+    const { fio, index, city, street, room = '', phone, amount } = body;
+    const amountKopecks = Math.round(Number(amount) * 100);
 
     console.log(JSON.stringify({
-      level: 'info', stage: 'config', requestId,
-      hasTbankTerminalKey:  !!terminalKey,
-      hasTbankSecretKey:    !!secretKey,
-      hasTelegramBotToken:  !!botToken,
-      hasTelegramChatId:    !!chatId,
+      level:              'info',
+      stage:              'config',
+      requestId,
+      orderId,
+      amountKopecks,
+      hasTerminalKey:     !!terminalKey,
+      hasSecretKey:       !!secretKey,
+      hasTelegramBotToken: !!botToken,
+      hasTelegramChatId:  !!chatId,
+      taxation,
+      tax,
+      paymentMethod,
+      paymentObject,
     }));
 
     if (!terminalKey || !secretKey) {
-      console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing Tbank env vars' }));
+      console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing T-Bank env vars' }));
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
     }
 
-    const { fio, index, city, street, room = '', phone, amount } = body;
-
     // Создаём платёж в Т-банке
-    const orderId    = requestId.replace(/-/g, '').slice(0, 20); // OrderId макс 20 символов
     const paymentUrl = await createTbankPayment({
       terminalKey,
       secretKey,
       amount,
       orderId,
       description: `Заказ @retromaika — ${fio}`,
-      baseUrl,
+      successUrl,
+      failUrl,
+      notificationUrl,
+      phone,
+      taxation,
+      paymentMethod,
+      paymentObject,
+      tax,
     });
 
-    // Русское сообщение в Telegram
-    const roomLineRu = room ? `\nКвартира: ${room}` : '';
-    const msgRu = [
-      'Новый заказ @retromaika',
-      '',
-      `ФИО: ${fio}`,
-      `Телефон: ${phone}`,
-      `Индекс: ${index}`,
-      `Город: ${city}`,
-      `Адрес: ${street}${roomLineRu}`,
-      `Сумма: ${Number(amount).toLocaleString('ru-RU')} ₽`,
-      '',
-      `requestId: ${requestId}`,
-      idempotencyKey ? `idempotencyKey: ${idempotencyKey}` : null,
-    ].filter(x => x !== null).join('\n');
-
-    // Английское сообщение (транслит + словарь городов)
-    const streetEn = capitalizeWords(translit(cleanAddressForEn(street)));
-    const cityEn   = cityToEn(city);
-    const nameEn   = translit(fio);
-    const msgEnLines = [
-      `Name: ${nameEn}`,
-      `Post code: ${index}`,
-      'Country: Russia',
-      `City: ${cityEn}`,
-      `Street: ${streetEn}`,
-    ];
-    if (room) msgEnLines.push(`Room: ${translit(cleanRoomForEn(room))}`);
-    msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
-    const msgEn = msgEnLines.join('\n');
-
-    // Отправляем оба сообщения в Telegram — необязательно, не блокирует оплату
+    // Telegram-уведомление — необязательно, не блокирует оплату
     if (botToken && chatId) {
+      const roomLineRu = room ? `\nКвартира: ${room}` : '';
+      const msgRu = [
+        'Новый заказ @retromaika',
+        '',
+        `ФИО: ${fio}`,
+        `Телефон: ${phone}`,
+        `Индекс: ${index}`,
+        `Город: ${city}`,
+        `Адрес: ${street}${roomLineRu}`,
+        `Сумма: ${Number(amount).toLocaleString('ru-RU')} ₽`,
+        '',
+        `orderId: ${orderId}`,
+        `requestId: ${requestId}`,
+        idempotencyKey ? `idempotencyKey: ${idempotencyKey}` : null,
+      ].filter(x => x !== null).join('\n');
+
+      const streetEn    = capitalizeWords(translit(cleanAddressForEn(street)));
+      const cityEn      = cityToEn(city);
+      const nameEn      = translit(fio);
+      const msgEnLines  = [
+        `Name: ${nameEn}`,
+        `Post code: ${index}`,
+        'Country: Russia',
+        `City: ${cityEn}`,
+        `Street: ${streetEn}`,
+      ];
+      if (room) msgEnLines.push(`Room: ${translit(cleanRoomForEn(room))}`);
+      msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
+      const msgEn = msgEnLines.join('\n');
+
       try {
         await sendTelegram(botToken, chatId, msgRu);
         await sendTelegram(botToken, chatId, msgEn);
@@ -362,12 +407,15 @@ exports.handler = async (event) => {
         }));
       }
     } else {
-      console.log(JSON.stringify({ level: 'info', stage: 'telegram', requestId, message: 'Telegram not configured, skipping' }));
+      console.log(JSON.stringify({
+        level: 'info', stage: 'telegram', requestId,
+        message: 'Telegram not configured, skipping',
+      }));
     }
 
     console.log(JSON.stringify({
       level: 'info', stage: 'create-payment',
-      requestId, idempotencyKey, amount, city, status: 'ok',
+      requestId, orderId, idempotencyKey, amountKopecks, city, status: 'ok',
     }));
 
     return json(200, { ok: true, requestId, redirectUrl: paymentUrl });
