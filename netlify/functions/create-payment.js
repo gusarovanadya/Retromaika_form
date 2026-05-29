@@ -7,13 +7,11 @@
 //   TBANK_FAIL_URL           — e.g. https://retromaikaform.netlify.app/fail.html
 //   TBANK_NOTIFICATION_URL   — e.g. https://retromaikaform.netlify.app/.netlify/functions/tbank-webhook
 //
-// Optional env vars (receipt / Telegram):
-//   TBANK_TAXATION           — default "usn_income"
-//   TBANK_TAX                — default "none"
-//   TBANK_PAYMENT_METHOD     — default "full_prepayment"
-//   TBANK_PAYMENT_OBJECT     — default "commodity"
-//   TELEGRAM_BOT_TOKEN
-//   TELEGRAM_CHAT_ID
+// Optional env vars (receipt):
+//   TBANK_TAXATION        — default "usn_income"
+//   TBANK_TAX             — default "none"
+//   TBANK_PAYMENT_METHOD  — default "full_prepayment"
+//   TBANK_PAYMENT_OBJECT  — default "commodity"
 
 const crypto = require('crypto');
 
@@ -24,161 +22,6 @@ function json(statusCode, body) {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
     body: JSON.stringify(body),
   };
-}
-
-// ── Транслитерация (ГОСТ 7.79-2000, система Б) ───────────────
-function translit(str) {
-  const map = {
-    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z',
-    'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
-    'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh',
-    'щ':'sch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
-    'А':'A','Б':'B','В':'V','Г':'G','Д':'D','Е':'E','Ё':'Yo','Ж':'Zh','З':'Z',
-    'И':'I','Й':'Y','К':'K','Л':'L','М':'M','Н':'N','О':'O','П':'P','Р':'R',
-    'С':'S','Т':'T','У':'U','Ф':'F','Х':'Kh','Ц':'Ts','Ч':'Ch','Ш':'Sh',
-    'Щ':'Sch','Ъ':'','Ы':'Y','Ь':'','Э':'E','Ю':'Yu','Я':'Ya',
-  };
-  return String(str || '').split('').map(c => (map[c] !== undefined ? map[c] : c)).join('');
-}
-
-// ── Словарь официальных английских названий городов ──────────
-const CITY_EN = {
-  'москва': 'Moscow',
-  'санкт-петербург': 'Saint Petersburg',
-  'санкт петербург': 'Saint Petersburg',
-  'петербург': 'Saint Petersburg',
-  'питер': 'Saint Petersburg',
-  'новосибирск': 'Novosibirsk',
-  'екатеринбург': 'Yekaterinburg',
-  'казань': 'Kazan',
-  'нижний новгород': 'Nizhny Novgorod',
-  'челябинск': 'Chelyabinsk',
-  'самара': 'Samara',
-  'уфа': 'Ufa',
-  'ростов-на-дону': 'Rostov-on-Don',
-  'ростов на дону': 'Rostov-on-Don',
-  'омск': 'Omsk',
-  'красноярск': 'Krasnoyarsk',
-  'воронеж': 'Voronezh',
-  'пермь': 'Perm',
-  'волгоград': 'Volgograd',
-  'краснодар': 'Krasnodar',
-  'саратов': 'Saratov',
-  'тюмень': 'Tyumen',
-  'тольятти': 'Tolyatti',
-  'ижевск': 'Izhevsk',
-  'барнаул': 'Barnaul',
-  'ульяновск': 'Ulyanovsk',
-  'иркутск': 'Irkutsk',
-  'хабаровск': 'Khabarovsk',
-  'ярославль': 'Yaroslavl',
-  'владивосток': 'Vladivostok',
-  'махачкала': 'Makhachkala',
-  'томск': 'Tomsk',
-  'оренбург': 'Orenburg',
-  'кемерово': 'Kemerovo',
-  'новокузнецк': 'Novokuznetsk',
-  'рязань': 'Ryazan',
-  'астрахань': 'Astrakhan',
-  'пенза': 'Penza',
-  'липецк': 'Lipetsk',
-  'тула': 'Tula',
-  'киров': 'Kirov',
-  'чебоксары': 'Cheboksary',
-  'калининград': 'Kaliningrad',
-  'брянск': 'Bryansk',
-  'курск': 'Kursk',
-  'иваново': 'Ivanovo',
-  'магнитогорск': 'Magnitogorsk',
-  'улан-удэ': 'Ulan-Ude',
-  'улан удэ': 'Ulan-Ude',
-  'сочи': 'Sochi',
-  'владимир': 'Vladimir',
-  'нижний тагил': 'Nizhny Tagil',
-  'белгород': 'Belgorod',
-  'ставрополь': 'Stavropol',
-  'сургут': 'Surgut',
-  'тверь': 'Tver',
-  'кострома': 'Kostroma',
-  'смоленск': 'Smolensk',
-  'чита': 'Chita',
-  'калуга': 'Kaluga',
-  'якутск': 'Yakutsk',
-  'волжский': 'Volzhsky',
-  'орёл': 'Oryol',
-  'орел': 'Oryol',
-  'мурманск': 'Murmansk',
-  'архангельск': 'Arkhangelsk',
-  'тамбов': 'Tambov',
-  'нальчик': 'Nalchik',
-  'грозный': 'Grozny',
-  'петрозаводск': 'Petrozavodsk',
-  'череповец': 'Cherepovets',
-  'вологда': 'Vologda',
-  'владикавказ': 'Vladikavkaz',
-  'серпухов': 'Serpukhov',
-  'курган': 'Kurgan',
-  'псков': 'Pskov',
-  'великий новгород': 'Veliky Novgorod',
-  'нижневартовск': 'Nizhnevartovsk',
-  'йошкар-ола': 'Yoshkar-Ola',
-  'йошкар ола': 'Yoshkar-Ola',
-  'саранск': 'Saransk',
-  'стерлитамак': 'Sterlitamak',
-  'балашиха': 'Balashikha',
-  'химки': 'Khimki',
-  'подольск': 'Podolsk',
-  'волгодонск': 'Volgodonsk',
-  'таганрог': 'Taganrog',
-  'комсомольск-на-амуре': 'Komsomolsk-on-Amur',
-  'нефтекамск': 'Neftekamsk',
-  'новороссийск': 'Novorossiysk',
-  'пятигорск': 'Pyatigorsk',
-  'люберцы': 'Lyubertsy',
-  'мытищи': 'Mytishchi',
-};
-
-function capitalizeWords(str) {
-  return String(str || '').replace(/\b([a-zA-Z])([a-zA-Z]*)/g, (_, f, r) => f.toUpperCase() + r);
-}
-
-function cityToEn(city) {
-  const key = String(city || '').trim().toLowerCase();
-  return CITY_EN[key] || capitalizeWords(translit(city));
-}
-
-// ── Очистка адреса от сокращений ─────────────────────────────
-function cleanAddressForEn(str) {
-  const prefixes = [
-    'улица','ул','шоссе','ш','проспект','пр-т','пр','переулок','пер',
-    'набережная','наб','площадь','пл','бульвар','б-р','бул','тупик','туп',
-    'проезд','пр-д','микрорайон','мкр','м-н','аллея','ал','линия','лин',
-    'владение','вл','дом','д','корпус','корп','к','строение','стр',
-  ].sort((a, b) => b.length - a.length);
-
-  let result = String(str || '');
-  prefixes.forEach(p => {
-    const re = new RegExp('(^|\\s)' + p.replace(/[-]/g, '\\-') + '\\.?(?=\\s|$)', 'gi');
-    result = result.replace(re, '$1');
-  });
-  return result
-    .replace(/\s*,\s*/g, ', ')
-    .replace(/\s+/g, ' ')
-    .replace(/^[\s,.\-]+|[\s,.\-]+$/g, '')
-    .trim();
-}
-
-function cleanRoomForEn(str) {
-  const prefixes = [
-    'квартира','кв','помещение','пом','офис','оф','комната','ком','апартаменты','апарт',
-  ].sort((a, b) => b.length - a.length);
-
-  let result = String(str || '');
-  prefixes.forEach(p => {
-    const re = new RegExp('(^|\\s)' + p + '\\.?(?=\\s|$)', 'gi');
-    result = result.replace(re, '$1');
-  });
-  return result.replace(/\s+/g, ' ').trim();
 }
 
 function cleanPhone(phone) {
@@ -204,8 +47,8 @@ function validate(body) {
 }
 
 // ── Подпись для Т-банк API (SHA-256) ─────────────────────────
-// Алгоритм: все верхнеуровневые параметры кроме Token, Receipt, DATA,
-// добавить Password, отсортировать по ключу, склеить значения, SHA-256
+// Все верхнеуровневые параметры кроме Token, Receipt, DATA,
+// + Password, отсортировать по ключу, склеить значения, SHA-256
 function makeTbankToken(params, secretKey) {
   const filtered = Object.assign({}, params, { Password: secretKey });
   delete filtered.Token;
@@ -217,30 +60,13 @@ function makeTbankToken(params, secretKey) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
-// ── Отправка в Telegram ───────────────────────────────────────
-async function sendTelegram(botToken, chatId, text) {
-  const controller = new AbortController();
-  const timeoutId  = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res  = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ chat_id: chatId, text }),
-      signal:  controller.signal,
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.description || `Telegram HTTP ${res.status}`);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
 // ── Создание платежа в Т-банке (ФФД 1.05) ────────────────────
 async function createTbankPayment({
   terminalKey, secretKey,
   amount, orderId, description,
   successUrl, failUrl, notificationUrl,
   phone, taxation, paymentMethod, paymentObject, tax,
+  customerData,
 }) {
   const amountKopecks = Math.round(amount * 100);
 
@@ -258,7 +84,7 @@ async function createTbankPayment({
 
   params.Token = makeTbankToken(params, secretKey);
 
-  // Receipt добавляем ПОСЛЕ расчёта подписи — не входит в Token
+  // Receipt и DATA добавляем ПОСЛЕ расчёта подписи — оба не входят в Token
   params.Receipt = {
     Phone:    cleanPhone(phone),
     Taxation: taxation,
@@ -272,6 +98,8 @@ async function createTbankPayment({
       Tax:           tax,
     }],
   };
+
+  params.DATA = customerData;
 
   const controller = new AbortController();
   const timeoutId  = setTimeout(() => controller.abort(), 10000);
@@ -318,25 +146,21 @@ exports.handler = async (event) => {
     const tax             = process.env.TBANK_TAX              || 'none';
     const paymentMethod   = process.env.TBANK_PAYMENT_METHOD   || 'full_prepayment';
     const paymentObject   = process.env.TBANK_PAYMENT_OBJECT   || 'commodity';
-    const botToken        = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId          = process.env.TELEGRAM_CHAT_ID;
 
-    // OrderId: UUID из заголовка, до 36 символов
+    // OrderId: UUID из заголовка запроса, до 36 символов
     const orderId = requestId.slice(0, 36);
 
     const { fio, index, city, street, room = '', phone, amount } = body;
     const amountKopecks = Math.round(Number(amount) * 100);
 
     console.log(JSON.stringify({
-      level:              'info',
-      stage:              'config',
+      level:           'info',
+      stage:           'config',
       requestId,
       orderId,
       amountKopecks,
-      hasTerminalKey:     !!terminalKey,
-      hasSecretKey:       !!secretKey,
-      hasTelegramBotToken: !!botToken,
-      hasTelegramChatId:  !!chatId,
+      hasTerminalKey:  !!terminalKey,
+      hasSecretKey:    !!secretKey,
       taxation,
       tax,
       paymentMethod,
@@ -344,11 +168,14 @@ exports.handler = async (event) => {
     }));
 
     if (!terminalKey || !secretKey) {
-      console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing T-Bank env vars' }));
+      console.error(JSON.stringify({
+        level: 'error', stage: 'config', requestId,
+        message: 'Missing T-Bank env vars',
+      }));
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
     }
 
-    // Создаём платёж в Т-банке
+    // Создаём платёж — Telegram не отправляется здесь
     const paymentUrl = await createTbankPayment({
       terminalKey,
       secretKey,
@@ -363,61 +190,16 @@ exports.handler = async (event) => {
       paymentMethod,
       paymentObject,
       tax,
+      // Данные заказа передаём через DATA — webhook использует их для Telegram
+      customerData: { fio, phone, index, city, street, room },
     });
-
-    // Telegram-уведомление — необязательно, не блокирует оплату
-    if (botToken && chatId) {
-      const roomLineRu = room ? `\nКвартира: ${room}` : '';
-      const msgRu = [
-        'Новый заказ @retromaika',
-        '',
-        `ФИО: ${fio}`,
-        `Телефон: ${phone}`,
-        `Индекс: ${index}`,
-        `Город: ${city}`,
-        `Адрес: ${street}${roomLineRu}`,
-        `Сумма: ${Number(amount).toLocaleString('ru-RU')} ₽`,
-        '',
-        `orderId: ${orderId}`,
-        `requestId: ${requestId}`,
-        idempotencyKey ? `idempotencyKey: ${idempotencyKey}` : null,
-      ].filter(x => x !== null).join('\n');
-
-      const streetEn    = capitalizeWords(translit(cleanAddressForEn(street)));
-      const cityEn      = cityToEn(city);
-      const nameEn      = translit(fio);
-      const msgEnLines  = [
-        `Name: ${nameEn}`,
-        `Post code: ${index}`,
-        'Country: Russia',
-        `City: ${cityEn}`,
-        `Street: ${streetEn}`,
-      ];
-      if (room) msgEnLines.push(`Room: ${translit(cleanRoomForEn(room))}`);
-      msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
-      const msgEn = msgEnLines.join('\n');
-
-      try {
-        await sendTelegram(botToken, chatId, msgRu);
-        await sendTelegram(botToken, chatId, msgEn);
-      } catch (tgErr) {
-        console.error(JSON.stringify({
-          level: 'error', stage: 'telegram',
-          requestId, message: tgErr.message,
-        }));
-      }
-    } else {
-      console.log(JSON.stringify({
-        level: 'info', stage: 'telegram', requestId,
-        message: 'Telegram not configured, skipping',
-      }));
-    }
 
     console.log(JSON.stringify({
       level: 'info', stage: 'create-payment',
       requestId, orderId, idempotencyKey, amountKopecks, city, status: 'ok',
     }));
 
+    // redirectUrl возвращается клиенту немедленно — до любых Telegram-действий
     return json(200, { ok: true, requestId, redirectUrl: paymentUrl });
 
   } catch (error) {
