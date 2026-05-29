@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>@retromaika — Заказ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #080809;
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  .bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+  .bg::before {
+    content: ''; position: absolute; top: -220px; left: 50%; transform: translateX(-50%);
+    width: 700px; height: 400px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(50,220,130,0.10) 0%, transparent 65%);
+  }
+  .bg::after {
+    content: ''; position: absolute; bottom: -150px; right: -100px; width: 400px; height: 400px;
+    background: radial-gradient(circle, rgba(130,60,255,0.06) 0%, transparent 65%);
+  }
+  .bg-blue { position: absolute; top: 20%; left: -180px; width: 350px; height: 350px; background: radial-gradient(circle, rgba(40,100,255,0.05) 0%, transparent 70%); }
+
+  .card {
+    position: relative; z-index: 1; width: 100%; max-width: 420px;
+    background: rgba(10,10,13,0.97); border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 28px; padding: 44px 38px 40px;
+    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 0 0 0.5px rgba(255,255,255,0.04) inset, 0 32px 80px rgba(0,0,0,0.7);
+    animation: cardIn 0.5s cubic-bezier(0.16,1,0.3,1) both;
+  }
+  @keyframes cardIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }
+  .card::before {
+    content: ''; position: absolute; top: 0; left: 10%; width: 80%; height: 1px;
+    background: linear-gradient(90deg, transparent 0%, rgba(50,220,130,0.55) 40%, rgba(80,180,255,0.35) 60%, transparent 100%);
+    border-radius: 999px;
+  }
+  .card-shine { position: absolute; top: 0; left: 0; right: 0; height: 120px; background: radial-gradient(ellipse at 50% -20px, rgba(255,255,255,0.04) 0%, transparent 70%); border-radius: 28px 28px 0 0; pointer-events: none; }
+  .header { text-align: center; margin-bottom: 34px; position: relative; }
+  .header h1 { font-size: 1.85rem; font-weight: 700; color: #FFFFFF; letter-spacing: -0.03em; line-height: 1.1; margin-bottom: 7px; }
+  .header-sub { font-size: 0.8rem; color: rgba(255,255,255,0.38); font-weight: 400; letter-spacing: 0.01em; }
+  .handle { color: rgba(50,220,130,0.85); font-weight: 500; }
+
+  .fields { display: flex; flex-direction: column; gap: 10px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .field { position: relative; }
+  .input-box { position: relative; background: rgba(255,255,255,0.055); border: 1px solid rgba(255,255,255,0.09); border-radius: 14px; transition: background 0.2s, border-color 0.2s, box-shadow 0.2s; overflow: hidden; }
+  .input-box:focus-within { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.18); box-shadow: 0 0 0 3px rgba(50,220,130,0.07); }
+  .input-box.invalid { border-color: rgba(255,70,70,0.35); background: rgba(255,70,70,0.05); }
+  .input-box.invalid:focus-within { box-shadow: 0 0 0 3px rgba(255,70,70,0.08); }
+  label.field-label { display: block; font-size: 0.64rem; font-weight: 600; color: rgba(255,255,255,0.38); letter-spacing: 0.06em; text-transform: uppercase; padding: 12px 14px 0; pointer-events: none; transition: color 0.2s; }
+  .input-box:focus-within label.field-label { color: rgba(50,220,130,0.7); }
+  .input-box.invalid label.field-label { color: rgba(255,100,100,0.7); }
+  input { display: block; width: 100%; background: transparent; border: none; outline: none; padding: 4px 14px 12px; font-family: 'Inter', sans-serif; font-size: 0.92rem; font-weight: 400; color: #FFFFFF; -webkit-appearance: none; }
+  input::placeholder { color: rgba(255,255,255,0.2); }
+  .error-msg { font-size: 0.65rem; color: rgba(255,100,100,0.85); margin-top: 4px; padding-left: 4px; display: none; }
+  .input-box.invalid ~ .error-msg { display: block; }
+  .divider { display: flex; align-items: center; gap: 12px; margin: 6px 0; }
+  .divider-line { flex: 1; height: 1px; background: rgba(255,255,255,0.07); }
+  .divider-text { font-size: 0.67rem; color: rgba(255,255,255,0.22); font-weight: 400; letter-spacing: 0.04em; white-space: nowrap; }
+
+  .checkboxes { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 8px; }
+  .checkbox-row { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; position: relative; }
+  .checkbox-row input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+  .checkbox-box { width: 18px; height: 18px; min-width: 18px; border: 1.5px solid rgba(255,255,255,0.2); border-radius: 5px; background: rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: center; margin-top: 1px; transition: all 0.2s; }
+  .checkbox-box svg { width: 10px; height: 10px; stroke: #080809; stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transition: opacity 0.15s; }
+  .checkbox-row input[type="checkbox"]:checked + .checkbox-box { background: rgba(50,220,130,0.9); border-color: rgba(50,220,130,0.9); }
+  .checkbox-row input[type="checkbox"]:checked + .checkbox-box svg { opacity: 1; }
+  .checkbox-row input[type="checkbox"]:focus-visible + .checkbox-box { box-shadow: 0 0 0 3px rgba(50,220,130,0.18); }
+  .checkbox-text { font-size: 0.65rem; color: rgba(255,255,255,0.35); line-height: 1.4; font-weight: 400; }
+  .checkbox-text a { color: rgba(50,220,130,0.75); text-decoration: none; border-bottom: 1px solid rgba(50,220,130,0.25); transition: color 0.2s, border-color 0.2s; }
+  .checkbox-text a:hover { color: rgba(50,220,130,1); border-color: rgba(50,220,130,0.6); }
+
+  .btn-pay { width: 100%; background: #FFFFFF; color: #080809; border: none; border-radius: 14px; padding: 15px 20px; font-family: 'Inter', sans-serif; font-size: 0.92rem; font-weight: 600; letter-spacing: -0.01em; cursor: pointer; position: relative; overflow: hidden; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 4px; }
+  .btn-pay::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.15) 100%); opacity: 0; transition: opacity 0.2s; }
+  .btn-pay:hover::after { opacity: 1; }
+  .btn-pay:active { transform: translateY(0); box-shadow: none; }
+  .btn-pay:disabled { background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.25); cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-pay:disabled .arrow { background: rgba(255,255,255,0.08); }
+  .btn-pay:disabled .arrow svg { stroke: rgba(255,255,255,0.25); }
+  .btn-pay:not(:disabled):hover { background: #F2F2F2; transform: translateY(-1px); box-shadow: 0 10px 32px rgba(0,0,0,0.45); }
+  .btn-pay .arrow { width: 16px; height: 16px; background: rgba(0,0,0,0.12); border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: transform 0.2s, background 0.2s; }
+  .btn-pay:hover .arrow { transform: translateX(2px); background: rgba(0,0,0,0.18); }
+  .btn-pay .arrow svg { width: 9px; height: 9px; stroke: #080809; fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+  .btn-label { display: flex; align-items: center; gap: 8px; transition: opacity 0.15s; }
+  .btn-pay.loading .btn-label { opacity: 0; }
+  .spinner { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s; }
+  .btn-pay.loading .spinner { opacity: 1; }
+  .spinner-ring { width: 20px; height: 20px; border: 2px solid rgba(0,0,0,0.1); border-top-color: #080809; border-radius: 50%; animation: spin 0.65s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .form-status { margin-top: 12px; font-size: 0.76rem; line-height: 1.4; color: rgba(255,255,255,0.55); min-height: 20px; text-align: center; }
+  .form-status.error { color: rgba(255,100,100,0.95); }
+  .form-status.success { color: rgba(50,220,130,0.95); }
+  .footer { text-align: center; margin-top: 18px; font-size: 0.68rem; color: rgba(255,255,255,0.18); display: flex; align-items: center; justify-content: center; gap: 6px; letter-spacing: 0.02em; }
+  .footer svg { width: 11px; height: 11px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .toast { position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(60px); background: rgba(20,10,10,0.96); border: 1px solid rgba(255,70,70,0.2); color: rgba(255,100,100,0.9); padding: 11px 20px; border-radius: 12px; font-size: 0.78rem; z-index: 200; transition: transform 0.3s cubic-bezier(0.16,1,0.3,1); white-space: nowrap; max-width: calc(100vw - 40px); text-align: center; }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+  @media (max-width: 460px) { .card { padding: 36px 22px 30px; border-radius: 22px; } .row { grid-template-columns: 1fr; } .header h1 { font-size: 1.55rem; } }
+</style>
+</head>
+<body>
+<div class="bg"><div class="bg-blue"></div></div>
+<div class="card">
+  <div class="card-shine"></div>
+  <div class="header">
+    <h1>Оформить заказ</h1>
+    <div class="header-sub"><span class="handle">@retromaika</span> · ретро футбольные майки</div>
+  </div>
+
+  <div id="amountDisplay" style="display:none; text-align:center; margin-bottom:16px; font-size:1.1rem; font-weight:600; color:rgba(50,220,130,0.9); letter-spacing:-0.01em;"></div>
+
+  <form id="orderForm" novalidate>
+    <div class="fields">
+      <div class="field">
+        <div class="input-box" id="box-fio"><label class="field-label" for="fio">ФИО</label><input type="text" id="fio" name="fio" placeholder="Иванов Иван Иванович" required autocomplete="name"></div>
+        <div class="error-msg">Введите полное ФИО</div>
+      </div>
+      <div class="row">
+        <div class="field"><div class="input-box" id="box-index"><label class="field-label" for="index">Индекс</label><input type="text" id="index" name="index" placeholder="123456" maxlength="6" inputmode="numeric" required></div><div class="error-msg">6 цифр</div></div>
+        <div class="field"><div class="input-box" id="box-city"><label class="field-label" for="city">Город</label><input type="text" id="city" name="city" placeholder="Москва" required autocomplete="address-level2"></div><div class="error-msg">Введите город</div></div>
+      </div>
+      <div class="field"><div class="input-box" id="box-street"><label class="field-label" for="street">Улица и дом</label><input type="text" id="street" name="street" placeholder="ул. Ленина, д. 1" required autocomplete="street-address"></div><div class="error-msg">Введите улицу и дом</div></div>
+      <div class="field"><div class="input-box" id="box-room"><label class="field-label" for="room">Квартира / помещение</label><input type="text" id="room" name="room" placeholder="кв. 10" autocomplete="off"></div></div>
+      <div class="field"><div class="input-box" id="box-phone"><label class="field-label" for="phone">Номер телефона</label><input type="tel" id="phone" name="phone" placeholder="+7 (999) 000-00-00" required autocomplete="tel" inputmode="tel"></div><div class="error-msg">Введите телефон</div></div>
+
+      <div class="divider"><div class="divider-line"></div><span class="divider-text">оплата через Т-банк</span><div class="divider-line"></div></div>
+
+      <div class="checkboxes">
+        <label class="checkbox-row">
+          <input type="checkbox" id="check1" name="offerAccepted" required>
+          <div class="checkbox-box"><svg viewBox="0 0 10 10"><polyline points="1.5,5 4,7.5 8.5,2.5"/></svg></div>
+          <span class="checkbox-text">Я принимаю условия <a href="https://docs.yandex.ru/docs/view?url=ya-disk-public%3A%2F%2FdlJLX8nAi867RGH5jhYyYLZNkqV6cEQJbWt7WB%2BOirrAwk7b3v316bkNyTiC%2B6bQq%2FJ6bpmRyOJonT3VoXnDag%3D%3D%3A%2FПубличная%20оферта%20(ред.%2006.02.2026г.).docx&name=Публичная%20оферта%20(ред.%2006.02.2026г.).docx" target="_blank" rel="noopener noreferrer">Оферты</a></span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="check2" name="privacyAccepted" required>
+          <div class="checkbox-box"><svg viewBox="0 0 10 10"><polyline points="1.5,5 4,7.5 8.5,2.5"/></svg></div>
+          <span class="checkbox-text">Я даю согласие на <a href="https://docs.yandex.ru/docs/view?url=ya-disk-public%3A%2F%2FdlJLX8nAi867RGH5jhYyYLZNkqV6cEQJbWt7WB%2BOirrAwk7b3v316bkNyTiC%2B6bQq%2FJ6bpmRyOJonT3VoXnDag%3D%3D%3A%2FСогласие_на_обработку_персональных_данных.docx&name=Согласие_на_обработку_персональных_данных.docx" target="_blank" rel="noopener noreferrer">обработку персональных данных</a> согласно <a href="https://docs.yandex.ru/docs/view?url=ya-disk-public%3A%2F%2FdlJLX8nAi867RGH5jhYyYLZNkqV6cEQJbWt7WB%2BOirrAwk7b3v316bkNyTiC%2B6bQq%2FJ6bpmRyOJonT3VoXnDag%3D%3D%3A%2FПолитика_обработки_персональных_данных_ред_06_02_2026г_.docx&name=Политика_обработки_персональных_данных_ред_06_02_2026г_.docx" target="_blank" rel="noopener noreferrer">Политике</a>, включая <a href="https://docs.yandex.ru/docs/view?url=ya-disk-public%3A%2F%2FdlJLX8nAi867RGH5jhYyYLZNkqV6cEQJbWt7WB%2BOirrAwk7b3v316bkNyTiC%2B6bQq%2FJ6bpmRyOJonT3VoXnDag%3D%3D%3A%2FСогласие_на_трансграничную_передачу_ПД.docx&name=Согласие_на_трансграничную_передачу_ПД.docx" target="_blank" rel="noopener noreferrer">трансграничную передачу</a> и <a href="https://docs.yandex.ru/docs/view?url=ya-disk-public%3A%2F%2FdlJLX8nAi867RGH5jhYyYLZNkqV6cEQJbWt7WB%2BOirrAwk7b3v316bkNyTiC%2B6bQq%2FJ6bpmRyOJonT3VoXnDag%3D%3D%3A%2FСогласие_на_информационно_рекламную_рассылку.docx&name=Согласие_на_информационно_рекламную_рассылку.docx" target="_blank" rel="noopener noreferrer">информационную рассылку</a></span>
+        </label>
+      </div>
+
+      <button type="submit" class="btn-pay" id="payBtn" disabled>
+        <span class="btn-label">Оплатить<div class="arrow"><svg viewBox="0 0 10 10"><path d="M2 5h6M5 2l3 3-3 3"/></svg></div></span>
+        <div class="spinner"><div class="spinner-ring"></div></div>
+      </button>
+      <p id="formStatus" class="form-status" aria-live="polite"></p>
+    </div>
+  </form>
+
+  <div class="footer"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Данные защищены · SSL шифрование</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script defer src="/assets/js/order.js"></script>
+</body>
+</html>
