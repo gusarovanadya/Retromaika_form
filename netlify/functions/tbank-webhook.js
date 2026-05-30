@@ -11,8 +11,7 @@
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 
-const crypto       = require('crypto');
-const { getStore } = require('@netlify/blobs');
+const crypto = require('crypto');
 
 // ── Транслитерация (ГОСТ 7.79-2000, система Б) ───────────────
 function translit(str) {
@@ -203,6 +202,54 @@ async function sendTelegram(botToken, chatId, text) {
   }
 }
 
+// ── Supabase клиент (без SDK, через REST API) ─────────────────
+function makeSupabase() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+
+  const hdrs = () => ({
+    'Content-Type': 'application/json',
+    'apikey':        key,
+    'Authorization': `Bearer ${key}`,
+  });
+
+  async function req(path, method, body, extra = {}) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(`${url}/rest/v1/${path}`, {
+        method,
+        headers: { ...hdrs(), ...extra },
+        body:    body != null ? JSON.stringify(body) : undefined,
+        signal:  ctrl.signal,
+      });
+      return res;
+    } finally {
+      clearTimeout(tid);
+    }
+  }
+
+  return {
+    async selectOne(table, col, val) {
+      const res = await req(
+        `${table}?${col}=eq.${encodeURIComponent(val)}&limit=1`,
+        'GET', null, { 'Accept': 'application/json' }
+      );
+      if (!res.ok) throw new Error(`supabase select ${table}: HTTP ${res.status}`);
+      const rows = await res.json();
+      return rows[0] || null;
+    },
+    async update(table, col, val, patch) {
+      const res = await req(
+        `${table}?${col}=eq.${encodeURIComponent(val)}`,
+        'PATCH', patch, { 'Prefer': 'return=minimal' }
+      );
+      if (!res.ok) throw new Error(`supabase update ${table}: HTTP ${res.status}`);
+    },
+  };
+}
+
 // ── Основной обработчик ───────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
@@ -256,30 +303,37 @@ exports.handler = async (event) => {
   if (isConfirmed && botToken && chatId) {
     const amountRub = Number(Amount) / 100;
 
-    // ── 1. Основной источник: Netlify Blobs ───────────────
+    // ── 1. Основной источник: Supabase ────────────────────
     let orderData = null;
-    try {
-      const store = getStore('orders');
-      orderData = await store.get(OrderId, { type: 'json' });
+    const db = makeSupabase();
+    if (db) {
+      try {
+        orderData = await db.selectOne('orders', 'order_id', OrderId);
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-read',
+          orderId: OrderId, found: !!orderData,
+        }));
+      } catch (dbErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'db-read',
+          orderId: OrderId, message: dbErr.message,
+        }));
+      }
+    } else {
       console.log(JSON.stringify({
-        level: 'info', stage: 'blob-read',
-        orderId: OrderId, found: !!orderData,
-      }));
-    } catch (blobErr) {
-      console.error(JSON.stringify({
-        level: 'error', stage: 'blob-read',
-        orderId: OrderId, message: blobErr.message,
+        level: 'warn', stage: 'db-read', orderId: OrderId,
+        message: 'Supabase not configured',
       }));
     }
 
-    // ── 2. Fallback: DATA из уведомления T-Bank ───────────
+    // ── 2. Резервный источник: DATA из уведомления T-Bank ─
     if (!orderData && data.DATA) {
       orderData = typeof data.DATA === 'string'
         ? (() => { try { return JSON.parse(data.DATA); } catch { return null; } })()
         : data.DATA;
       if (orderData) {
         console.log(JSON.stringify({
-          level: 'info', stage: 'blob-read',
+          level: 'info', stage: 'db-read',
           orderId: OrderId, found: true, source: 'tbank-data',
         }));
       }
@@ -342,19 +396,17 @@ exports.handler = async (event) => {
     }
 
     // ── Помечаем заказ как paid (некритично) ─────────────
-    if (orderData) {
+    if (db && orderData) {
       try {
-        const store = getStore('orders');
-        await store.setJSON(OrderId, {
-          ...orderData,
-          status:    'paid',
-          paymentId: String(PaymentId),
-          paidAt:    new Date().toISOString(),
+        await db.update('orders', 'order_id', OrderId, {
+          status:     'paid',
+          payment_id: String(PaymentId),
+          paid_at:    new Date().toISOString(),
         });
-      } catch (blobErr) {
+      } catch (dbErr) {
         console.error(JSON.stringify({
-          level: 'error', stage: 'blob-update',
-          orderId: OrderId, message: blobErr.message,
+          level: 'error', stage: 'db-update',
+          orderId: OrderId, message: dbErr.message,
         }));
       }
     }

@@ -13,8 +13,7 @@
 //   TBANK_PAYMENT_METHOD  — default "full_prepayment"
 //   TBANK_PAYMENT_OBJECT  — default "commodity"
 
-const crypto      = require('crypto');
-const { getStore } = require('@netlify/blobs');
+const crypto = require('crypto');
 
 // ── Вспомогательная функция ответа ───────────────────────────
 function json(statusCode, body) {
@@ -126,6 +125,57 @@ async function createTbankPayment({
   }
 }
 
+// ── Supabase клиент (без SDK, через REST API) ─────────────────
+//
+// Ожидаемая схема таблицы orders:
+//   order_id       TEXT UNIQUE NOT NULL
+//   fio            TEXT
+//   phone          TEXT
+//   index          TEXT   — почтовый индекс
+//   city           TEXT
+//   street         TEXT
+//   room           TEXT
+//   amount         NUMERIC
+//   amount_kopecks INTEGER
+//   status         TEXT     DEFAULT 'pending'
+//   payment_id     TEXT
+//   created_at     TIMESTAMPTZ DEFAULT now()
+//   paid_at        TIMESTAMPTZ
+function makeSupabase() {
+  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+
+  const hdrs = () => ({
+    'Content-Type': 'application/json',
+    'apikey':        key,
+    'Authorization': `Bearer ${key}`,
+  });
+
+  async function req(path, method, body, extra = {}) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const res = await fetch(`${url}/rest/v1/${path}`, {
+        method,
+        headers: { ...hdrs(), ...extra },
+        body:    body != null ? JSON.stringify(body) : undefined,
+        signal:  ctrl.signal,
+      });
+      return res;
+    } finally {
+      clearTimeout(tid);
+    }
+  }
+
+  return {
+    async insert(table, row) {
+      const res = await req(table, 'POST', row, { 'Prefer': 'return=minimal' });
+      if (!res.ok) throw new Error(`supabase insert ${table}: HTTP ${res.status}`);
+    },
+  };
+}
+
 // ── Основной обработчик ───────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') return json(405, { error: 'Method not allowed' });
@@ -176,23 +226,36 @@ exports.handler = async (event) => {
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
     }
 
-    // Сохраняем заказ в Netlify Blobs по orderId до вызова Init.
-    // tbank-webhook.js прочитает запись по тому же orderId при CONFIRMED.
-    try {
-      const store = getStore('orders');
-      await store.setJSON(orderId, {
-        fio, phone, index, city, street, room,
-        amount:       Number(amount),
-        amountKopecks,
-        createdAt:    new Date().toISOString(),
-        status:       'pending',
-      });
-      console.log(JSON.stringify({ level: 'info', stage: 'blob-save', requestId, orderId }));
-    } catch (blobErr) {
-      // Ненадёжный blob не блокирует оплату — webhook упадёт в fallback
-      console.error(JSON.stringify({
-        level: 'error', stage: 'blob-save',
-        requestId, orderId, message: blobErr.message,
+    // Сохраняем заказ в Supabase до вызова Init.
+    // tbank-webhook.js найдёт строку по order_id при CONFIRMED.
+    const db = makeSupabase();
+    if (db) {
+      try {
+        await db.insert('orders', {
+          order_id:       orderId,
+          fio,
+          phone,
+          index,
+          city,
+          street,
+          room,
+          amount:         Number(amount),
+          amount_kopecks: amountKopecks,
+          created_at:     new Date().toISOString(),
+          status:         'pending',
+        });
+        console.log(JSON.stringify({ level: 'info', stage: 'db-save', requestId, orderId }));
+      } catch (dbErr) {
+        // Ошибка БД не блокирует оплату — webhook использует fallback
+        console.error(JSON.stringify({
+          level: 'error', stage: 'db-save',
+          requestId, orderId, message: dbErr.message,
+        }));
+      }
+    } else {
+      console.log(JSON.stringify({
+        level: 'warn', stage: 'db-save', requestId,
+        message: 'Supabase not configured — order not persisted',
       }));
     }
 
