@@ -371,9 +371,12 @@ exports.handler = async (event) => {
       msgEn = null;
     }
 
+    // ── Отправка в Telegram — результат определяет статус ─
+    let telegramSent = false;
     try {
       await sendTelegram(botToken, chatId, msgRu);
       if (msgEn) await sendTelegram(botToken, chatId, msgEn);
+      telegramSent = true;
     } catch (err) {
       console.error(JSON.stringify({
         level:   'error',
@@ -383,20 +386,22 @@ exports.handler = async (event) => {
       }));
     }
 
-    // ── Помечаем заказ как paid — один раз ───────────────
+    // ── Обновляем статус только после успешной отправки ──
+    // Если Telegram упал → status='telegram_failed', paid_at не ставится.
+    // При повторном вебхуке idempotency пропустит только status='paid',
+    // поэтому повторная попытка отправки Telegram произойдёт автоматически.
     if (db) {
       try {
-        const { error: updateErr } = await db.from('orders').update({
-          status:     'paid',
-          payment_id: String(PaymentId),
-          paid_at:    new Date().toISOString(),
-        }).eq('order_id', OrderId);
+        const patch = telegramSent
+          ? { status: 'paid', payment_id: String(PaymentId), paid_at: new Date().toISOString() }
+          : { status: 'telegram_failed', payment_id: String(PaymentId) };
 
+        const { error: updateErr } = await db.from('orders').update(patch).eq('order_id', OrderId);
         if (updateErr) throw new Error(updateErr.message);
 
         console.log(JSON.stringify({
           level: 'info', stage: 'db-update',
-          orderId: OrderId, status: 'paid',
+          orderId: OrderId, status: patch.status,
         }));
       } catch (dbErr) {
         console.error(JSON.stringify({
