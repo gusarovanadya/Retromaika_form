@@ -2,16 +2,20 @@
 //
 // Receives payment status notifications from T-Bank.
 // Telegram is sent ONLY when Status === "CONFIRMED" and Success === true.
+// Idempotency: if order already has status="paid", Telegram is NOT sent again.
 // T-Bank expects HTTP 200 with body "OK" — always returned, even on auth failure.
 //
 // Required env vars:
-//   TBANK_SECRET_KEY     — used to verify the notification Token
+//   TBANK_SECRET_KEY          — used to verify the notification Token
+//   SUPABASE_URL              — Supabase project URL
+//   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key (server-side only)
 //
 // Optional env vars:
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 // ── Транслитерация (ГОСТ 7.79-2000, система Б) ───────────────
 function translit(str) {
@@ -202,52 +206,13 @@ async function sendTelegram(botToken, chatId, text) {
   }
 }
 
-// ── Supabase клиент (без SDK, через REST API) ─────────────────
+// ── Supabase клиент (@supabase/supabase-js SDK) ───────────────
+// Использует только server-side переменные окружения.
 function makeSupabase() {
-  const url = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) return null;
-
-  const hdrs = () => ({
-    'Content-Type': 'application/json',
-    'apikey':        key,
-    'Authorization': `Bearer ${key}`,
-  });
-
-  async function req(path, method, body, extra = {}) {
-    const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 5000);
-    try {
-      const res = await fetch(`${url}/rest/v1/${path}`, {
-        method,
-        headers: { ...hdrs(), ...extra },
-        body:    body != null ? JSON.stringify(body) : undefined,
-        signal:  ctrl.signal,
-      });
-      return res;
-    } finally {
-      clearTimeout(tid);
-    }
-  }
-
-  return {
-    async selectOne(table, col, val) {
-      const res = await req(
-        `${table}?${col}=eq.${encodeURIComponent(val)}&limit=1`,
-        'GET', null, { 'Accept': 'application/json' }
-      );
-      if (!res.ok) throw new Error(`supabase select ${table}: HTTP ${res.status}`);
-      const rows = await res.json();
-      return rows[0] || null;
-    },
-    async update(table, col, val, patch) {
-      const res = await req(
-        `${table}?${col}=eq.${encodeURIComponent(val)}`,
-        'PATCH', patch, { 'Prefer': 'return=minimal' }
-      );
-      if (!res.ok) throw new Error(`supabase update ${table}: HTTP ${res.status}`);
-    },
-  };
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 // ── Основной обработчик ───────────────────────────────────────
@@ -302,17 +267,40 @@ exports.handler = async (event) => {
 
   if (isConfirmed && botToken && chatId) {
     const amountRub = Number(Amount) / 100;
+    const db = makeSupabase();
 
     // ── 1. Основной источник: Supabase ────────────────────
-    let orderData = null;
-    const db = makeSupabase();
+    let orderData   = null;
+    let orderFromDb = false;
+
     if (db) {
       try {
-        orderData = await db.selectOne('orders', 'order_id', OrderId);
+        const { data: row, error: dbErr } = await db
+          .from('orders')
+          .select('*')
+          .eq('order_id', OrderId)
+          .maybeSingle();
+
+        if (dbErr) throw new Error(dbErr.message);
+
+        orderData   = row;
+        orderFromDb = !!row;
+
         console.log(JSON.stringify({
           level: 'info', stage: 'db-read',
-          orderId: OrderId, found: !!orderData,
+          orderId: OrderId, found: orderFromDb,
         }));
+
+        // ── Защита от дублей: не отправлять повторно ─────
+        if (orderData && orderData.status === 'paid') {
+          console.log(JSON.stringify({
+            level:   'info',
+            stage:   'webhook-idempotency',
+            orderId: OrderId,
+            message: 'Order already paid — skipping duplicate Telegram',
+          }));
+          return { statusCode: 200, body: 'OK' };
+        }
       } catch (dbErr) {
         console.error(JSON.stringify({
           level: 'error', stage: 'db-read',
@@ -372,7 +360,7 @@ exports.handler = async (event) => {
       msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
       msgEn = msgEnLines.join('\n');
     } else {
-      // ── 3. Данные не найдены ни в Blobs, ни в DATA ───────
+      // ── 3. Данные не найдены ни в Supabase, ни в DATA ────
       msgRu = [
         '✅ Оплата прошла @retromaika',
         '',
@@ -395,14 +383,21 @@ exports.handler = async (event) => {
       }));
     }
 
-    // ── Помечаем заказ как paid (некритично) ─────────────
-    if (db && orderData) {
+    // ── Помечаем заказ как paid — один раз ───────────────
+    if (db) {
       try {
-        await db.update('orders', 'order_id', OrderId, {
+        const { error: updateErr } = await db.from('orders').update({
           status:     'paid',
           payment_id: String(PaymentId),
           paid_at:    new Date().toISOString(),
-        });
+        }).eq('order_id', OrderId);
+
+        if (updateErr) throw new Error(updateErr.message);
+
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-update',
+          orderId: OrderId, status: 'paid',
+        }));
       } catch (dbErr) {
         console.error(JSON.stringify({
           level: 'error', stage: 'db-update',
