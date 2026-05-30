@@ -13,7 +13,8 @@
 //   TBANK_PAYMENT_METHOD  — default "full_prepayment"
 //   TBANK_PAYMENT_OBJECT  — default "commodity"
 
-const crypto = require('crypto');
+const crypto      = require('crypto');
+const { getStore } = require('@netlify/blobs');
 
 // ── Вспомогательная функция ответа ───────────────────────────
 function json(statusCode, body) {
@@ -173,6 +174,26 @@ exports.handler = async (event) => {
         message: 'Missing T-Bank env vars',
       }));
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
+    }
+
+    // Сохраняем заказ в Netlify Blobs по orderId до вызова Init.
+    // tbank-webhook.js прочитает запись по тому же orderId при CONFIRMED.
+    try {
+      const store = getStore('orders');
+      await store.setJSON(orderId, {
+        fio, phone, index, city, street, room,
+        amount:       Number(amount),
+        amountKopecks,
+        createdAt:    new Date().toISOString(),
+        status:       'pending',
+      });
+      console.log(JSON.stringify({ level: 'info', stage: 'blob-save', requestId, orderId }));
+    } catch (blobErr) {
+      // Ненадёжный blob не блокирует оплату — webhook упадёт в fallback
+      console.error(JSON.stringify({
+        level: 'error', stage: 'blob-save',
+        requestId, orderId, message: blobErr.message,
+      }));
     }
 
     // Создаём платёж — Telegram не отправляется здесь

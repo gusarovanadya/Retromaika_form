@@ -11,7 +11,8 @@
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 
-const crypto = require('crypto');
+const crypto       = require('crypto');
+const { getStore } = require('@netlify/blobs');
 
 // ── Транслитерация (ГОСТ 7.79-2000, система Б) ───────────────
 function translit(str) {
@@ -237,14 +238,6 @@ exports.handler = async (event) => {
 
   const { Status, OrderId, PaymentId, Amount, Pan, ErrorCode, Success } = data;
 
-  // DATA может прийти как объект (штатно) или как строка (защитный разбор)
-  let customerData = {};
-  if (data.DATA) {
-    customerData = typeof data.DATA === 'string'
-      ? (() => { try { return JSON.parse(data.DATA); } catch { return {}; } })()
-      : data.DATA;
-  }
-
   console.log(JSON.stringify({
     level:     'info',
     stage:     'webhook',
@@ -261,8 +254,38 @@ exports.handler = async (event) => {
   const isConfirmed = (Success === true || Success === 'true') && Status === 'CONFIRMED';
 
   if (isConfirmed && botToken && chatId) {
-    const { fio, phone, index, city, street, room } = customerData;
     const amountRub = Number(Amount) / 100;
+
+    // ── 1. Основной источник: Netlify Blobs ───────────────
+    let orderData = null;
+    try {
+      const store = getStore('orders');
+      orderData = await store.get(OrderId, { type: 'json' });
+      console.log(JSON.stringify({
+        level: 'info', stage: 'blob-read',
+        orderId: OrderId, found: !!orderData,
+      }));
+    } catch (blobErr) {
+      console.error(JSON.stringify({
+        level: 'error', stage: 'blob-read',
+        orderId: OrderId, message: blobErr.message,
+      }));
+    }
+
+    // ── 2. Fallback: DATA из уведомления T-Bank ───────────
+    if (!orderData && data.DATA) {
+      orderData = typeof data.DATA === 'string'
+        ? (() => { try { return JSON.parse(data.DATA); } catch { return null; } })()
+        : data.DATA;
+      if (orderData) {
+        console.log(JSON.stringify({
+          level: 'info', stage: 'blob-read',
+          orderId: OrderId, found: true, source: 'tbank-data',
+        }));
+      }
+    }
+
+    const { fio, phone, index, city, street, room } = orderData || {};
 
     let msgRu, msgEn;
 
@@ -295,12 +318,14 @@ exports.handler = async (event) => {
       msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
       msgEn = msgEnLines.join('\n');
     } else {
-      // DATA не пришёл или неполный — минимальный fallback
+      // ── 3. Данные не найдены ни в Blobs, ни в DATA ───────
       msgRu = [
         '✅ Оплата прошла @retromaika',
         '',
         `Сумма: ${amountRub.toLocaleString('ru-RU')} ₽`,
-      ].join('\n');
+        `OrderId: ${OrderId}`,
+        PaymentId ? `PaymentId: ${PaymentId}` : null,
+      ].filter(Boolean).join('\n');
       msgEn = null;
     }
 
@@ -314,6 +339,24 @@ exports.handler = async (event) => {
         orderId: OrderId,
         message: err.message,
       }));
+    }
+
+    // ── Помечаем заказ как paid (некритично) ─────────────
+    if (orderData) {
+      try {
+        const store = getStore('orders');
+        await store.setJSON(OrderId, {
+          ...orderData,
+          status:    'paid',
+          paymentId: String(PaymentId),
+          paidAt:    new Date().toISOString(),
+        });
+      } catch (blobErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'blob-update',
+          orderId: OrderId, message: blobErr.message,
+        }));
+      }
     }
   }
 
