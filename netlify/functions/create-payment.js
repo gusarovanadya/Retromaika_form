@@ -6,6 +6,8 @@
 //   TBANK_SUCCESS_URL        — e.g. https://retromaikaform.netlify.app/success.html
 //   TBANK_FAIL_URL           — e.g. https://retromaikaform.netlify.app/fail.html
 //   TBANK_NOTIFICATION_URL   — e.g. https://retromaikaform.netlify.app/.netlify/functions/tbank-webhook
+//   SUPABASE_URL             — Supabase project URL
+//   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key (server-side only, never exposed to frontend)
 //
 // Optional env vars (receipt):
 //   TBANK_TAXATION        — default "usn_income"
@@ -14,6 +16,7 @@
 //   TBANK_PAYMENT_OBJECT  — default "commodity"
 
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 // ── Вспомогательная функция ответа ───────────────────────────
 function json(statusCode, body) {
@@ -125,6 +128,16 @@ async function createTbankPayment({
   }
 }
 
+// ── Supabase клиент (@supabase/supabase-js SDK) ───────────────
+// Использует только server-side переменные окружения.
+// Ключи никогда не передаются во frontend.
+function makeSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
 // ── Основной обработчик ───────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') return json(405, { error: 'Method not allowed' });
@@ -147,6 +160,14 @@ exports.handler = async (event) => {
     const paymentMethod   = process.env.TBANK_PAYMENT_METHOD   || 'full_prepayment';
     const paymentObject   = process.env.TBANK_PAYMENT_OBJECT   || 'commodity';
 
+    if (!terminalKey || !secretKey) {
+      console.error(JSON.stringify({
+        level: 'error', stage: 'config', requestId,
+        message: 'Missing T-Bank env vars',
+      }));
+      return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
+    }
+
     // OrderId: UUID из заголовка запроса, до 36 символов
     const orderId = requestId.slice(0, 36);
 
@@ -167,39 +188,86 @@ exports.handler = async (event) => {
       paymentObject,
     }));
 
-    if (!terminalKey || !secretKey) {
+    // ── 1. Supabase INSERT — блокирующий ──────────────────────
+    // Платёж создаётся только после успешного сохранения заказа.
+    const db = makeSupabase();
+    if (!db) {
       console.error(JSON.stringify({
-        level: 'error', stage: 'config', requestId,
-        message: 'Missing T-Bank env vars',
+        level: 'error', stage: 'db-init', requestId,
+        message: 'Supabase not configured — SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing',
       }));
-      return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
+      return json(500, { error: 'Ошибка конфигурации базы данных', requestId });
     }
 
-    // Создаём платёж — Telegram не отправляется здесь
-    const paymentUrl = await createTbankPayment({
-      terminalKey,
-      secretKey,
-      amount,
-      orderId,
-      description: `Заказ @retromaika — ${fio}`,
-      successUrl,
-      failUrl,
-      notificationUrl,
+    const { error: dbError } = await db.from('orders').insert({
+      order_id:   orderId,
+      fio,
       phone,
-      taxation,
-      paymentMethod,
-      paymentObject,
-      tax,
-      // Данные заказа передаём через DATA — webhook использует их для Telegram
-      customerData: { fio, phone, index, city, street, room },
+      index,
+      city,
+      street,
+      room,
+      amount:     Number(amount),
+      created_at: new Date().toISOString(),
+      status:     'pending',
     });
+
+    if (dbError) {
+      console.error(JSON.stringify({
+        level:   'error',
+        stage:   'db-save',
+        requestId,
+        orderId,
+        message: dbError.message,
+        code:    dbError.code,
+      }));
+      return json(500, { error: 'Ошибка сохранения заказа', requestId });
+    }
+
+    console.log(JSON.stringify({ level: 'info', stage: 'db-save', requestId, orderId }));
+
+    // ── 2. T-Bank Init — только после успешного INSERT ────────
+    let paymentUrl;
+    try {
+      paymentUrl = await createTbankPayment({
+        terminalKey,
+        secretKey,
+        amount,
+        orderId,
+        description: `Заказ @retromaika — ${fio}`,
+        successUrl,
+        failUrl,
+        notificationUrl,
+        phone,
+        taxation,
+        paymentMethod,
+        paymentObject,
+        tax,
+        // Данные заказа передаём через DATA — webhook использует их как резерв
+        customerData: { fio, phone, index, city, street, room },
+      });
+    } catch (tbankError) {
+      // INSERT прошёл, но Init упал — обновляем статус (некритично)
+      try {
+        await db.from('orders').update({ status: 'payment_init_failed' }).eq('order_id', orderId);
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-update-init-failed', requestId, orderId,
+        }));
+      } catch (updateErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'db-update-init-failed',
+          requestId, orderId, message: updateErr.message,
+        }));
+      }
+      throw tbankError;
+    }
 
     console.log(JSON.stringify({
       level: 'info', stage: 'create-payment',
       requestId, orderId, idempotencyKey, amountKopecks, city, status: 'ok',
     }));
 
-    // redirectUrl возвращается клиенту немедленно — до любых Telegram-действий
+    // redirectUrl возвращается клиенту немедленно
     return json(200, { ok: true, requestId, redirectUrl: paymentUrl });
 
   } catch (error) {

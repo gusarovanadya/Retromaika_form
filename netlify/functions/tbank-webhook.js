@@ -2,16 +2,20 @@
 //
 // Receives payment status notifications from T-Bank.
 // Telegram is sent ONLY when Status === "CONFIRMED" and Success === true.
+// Idempotency: if order already has status="paid", Telegram is NOT sent again.
 // T-Bank expects HTTP 200 with body "OK" — always returned, even on auth failure.
 //
 // Required env vars:
-//   TBANK_SECRET_KEY     — used to verify the notification Token
+//   TBANK_SECRET_KEY          — used to verify the notification Token
+//   SUPABASE_URL              — Supabase project URL
+//   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key (server-side only)
 //
 // Optional env vars:
 //   TELEGRAM_BOT_TOKEN
 //   TELEGRAM_CHAT_ID
 
 const crypto = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 // ── Транслитерация (ГОСТ 7.79-2000, система Б) ───────────────
 function translit(str) {
@@ -202,6 +206,15 @@ async function sendTelegram(botToken, chatId, text) {
   }
 }
 
+// ── Supabase клиент (@supabase/supabase-js SDK) ───────────────
+// Использует только server-side переменные окружения.
+function makeSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
 // ── Основной обработчик ───────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
@@ -237,14 +250,6 @@ exports.handler = async (event) => {
 
   const { Status, OrderId, PaymentId, Amount, Pan, ErrorCode, Success } = data;
 
-  // DATA может прийти как объект (штатно) или как строка (защитный разбор)
-  let customerData = {};
-  if (data.DATA) {
-    customerData = typeof data.DATA === 'string'
-      ? (() => { try { return JSON.parse(data.DATA); } catch { return {}; } })()
-      : data.DATA;
-  }
-
   console.log(JSON.stringify({
     level:     'info',
     stage:     'webhook',
@@ -261,8 +266,68 @@ exports.handler = async (event) => {
   const isConfirmed = (Success === true || Success === 'true') && Status === 'CONFIRMED';
 
   if (isConfirmed && botToken && chatId) {
-    const { fio, phone, index, city, street, room } = customerData;
     const amountRub = Number(Amount) / 100;
+    const db = makeSupabase();
+
+    // ── 1. Основной источник: Supabase ────────────────────
+    let orderData   = null;
+    let orderFromDb = false;
+
+    if (db) {
+      try {
+        const { data: row, error: dbErr } = await db
+          .from('orders')
+          .select('*')
+          .eq('order_id', OrderId)
+          .maybeSingle();
+
+        if (dbErr) throw new Error(dbErr.message);
+
+        orderData   = row;
+        orderFromDb = !!row;
+
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-read',
+          orderId: OrderId, found: orderFromDb,
+        }));
+
+        // ── Защита от дублей: не отправлять повторно ─────
+        if (orderData && orderData.status === 'paid') {
+          console.log(JSON.stringify({
+            level:   'info',
+            stage:   'webhook-idempotency',
+            orderId: OrderId,
+            message: 'Order already paid — skipping duplicate Telegram',
+          }));
+          return { statusCode: 200, body: 'OK' };
+        }
+      } catch (dbErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'db-read',
+          orderId: OrderId, message: dbErr.message,
+        }));
+      }
+    } else {
+      console.log(JSON.stringify({
+        level: 'warn', stage: 'db-read', orderId: OrderId,
+        message: 'Supabase not configured',
+      }));
+    }
+
+    // ── 2. Резервный источник: DATA из уведомления T-Bank ─
+    if (!orderData && data.DATA) {
+      orderData = typeof data.DATA === 'string'
+        ? (() => { try { return JSON.parse(data.DATA); } catch { return null; } })()
+        : data.DATA;
+      if (orderData) {
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-read',
+          orderId: OrderId, found: true, source: 'tbank-data',
+        }));
+      }
+    }
+
+    const { fio, phone, index, city, street, room } = orderData || {};
 
     let msgRu, msgEn;
 
@@ -295,18 +360,23 @@ exports.handler = async (event) => {
       msgEnLines.push(`Phone number: ${cleanPhone(phone)}`);
       msgEn = msgEnLines.join('\n');
     } else {
-      // DATA не пришёл или неполный — минимальный fallback
+      // ── 3. Данные не найдены ни в Supabase, ни в DATA ────
       msgRu = [
         '✅ Оплата прошла @retromaika',
         '',
         `Сумма: ${amountRub.toLocaleString('ru-RU')} ₽`,
-      ].join('\n');
+        `OrderId: ${OrderId}`,
+        PaymentId ? `PaymentId: ${PaymentId}` : null,
+      ].filter(Boolean).join('\n');
       msgEn = null;
     }
 
+    // ── Отправка в Telegram — результат определяет статус ─
+    let telegramSent = false;
     try {
       await sendTelegram(botToken, chatId, msgRu);
       if (msgEn) await sendTelegram(botToken, chatId, msgEn);
+      telegramSent = true;
     } catch (err) {
       console.error(JSON.stringify({
         level:   'error',
@@ -314,6 +384,31 @@ exports.handler = async (event) => {
         orderId: OrderId,
         message: err.message,
       }));
+    }
+
+    // ── Обновляем статус только после успешной отправки ──
+    // Если Telegram упал → status='telegram_failed', paid_at не ставится.
+    // При повторном вебхуке idempotency пропустит только status='paid',
+    // поэтому повторная попытка отправки Telegram произойдёт автоматически.
+    if (db) {
+      try {
+        const patch = telegramSent
+          ? { status: 'paid', payment_id: String(PaymentId), paid_at: new Date().toISOString() }
+          : { status: 'telegram_failed', payment_id: String(PaymentId) };
+
+        const { error: updateErr } = await db.from('orders').update(patch).eq('order_id', OrderId);
+        if (updateErr) throw new Error(updateErr.message);
+
+        console.log(JSON.stringify({
+          level: 'info', stage: 'db-update',
+          orderId: OrderId, status: patch.status,
+        }));
+      } catch (dbErr) {
+        console.error(JSON.stringify({
+          level: 'error', stage: 'db-update',
+          orderId: OrderId, message: dbErr.message,
+        }));
+      }
     }
   }
 
