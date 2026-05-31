@@ -38,13 +38,15 @@ function validate(body) {
   const city   = String(body.city   || '').trim();
   const street = String(body.street || '').trim();
   const phone  = String(body.phone  || '').trim();
+  const email  = String(body.email  || '').trim();
   const amount = Number(body.amount);
 
-  if (fio.split(/\s+/).filter(Boolean).length < 2) return 'Некорректное ФИО';
-  if (!/^\d{6}$/.test(index))                       return 'Некорректный индекс';
-  if (city.length < 2 || street.length < 3)         return 'Некорректный адрес';
-  if (phone.replace(/\D/g, '').length !== 11)        return 'Некорректный телефон';
-  if (!body.offerAccepted || !body.privacyAccepted)  return 'Согласия не подтверждены';
+  if (fio.split(/\s+/).filter(Boolean).length < 2)      return 'Некорректное ФИО';
+  if (!/^\d{6}$/.test(index))                            return 'Некорректный индекс';
+  if (city.length < 2 || street.length < 3)              return 'Некорректный адрес';
+  if (phone.replace(/\D/g, '').length !== 11)             return 'Некорректный телефон';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))         return 'Некорректный email';
+  if (!body.offerAccepted || !body.privacyAccepted)       return 'Согласия не подтверждены';
   if (!amount || amount <= 0 || !Number.isFinite(amount)) return 'Некорректная сумма';
   return null;
 }
@@ -68,7 +70,7 @@ async function createTbankPayment({
   terminalKey, secretKey,
   amount, orderId, description,
   successUrl, failUrl, notificationUrl,
-  phone, taxation, paymentMethod, paymentObject, tax,
+  email, taxation, paymentMethod, paymentObject, tax,
   customerData,
 }) {
   const amountKopecks = Math.round(amount * 100);
@@ -89,7 +91,7 @@ async function createTbankPayment({
 
   // Receipt и DATA добавляем ПОСЛЕ расчёта подписи — оба не входят в Token
   params.Receipt = {
-    Phone:    cleanPhone(phone),
+    Email:    email,
     Taxation: taxation,
     Items: [{
       Name:          'Футбольная атрибутика Retromaika',
@@ -171,7 +173,7 @@ exports.handler = async (event) => {
     // OrderId: UUID из заголовка запроса, до 36 символов
     const orderId = requestId.slice(0, 36);
 
-    const { fio, index, city, street, room = '', phone, amount } = body;
+    const { fio, index, city, street, room = '', phone, email, amount } = body;
     const amountKopecks = Math.round(Number(amount) * 100);
 
     console.log(JSON.stringify({
@@ -203,6 +205,7 @@ exports.handler = async (event) => {
       order_id:   orderId,
       fio,
       phone,
+      email,
       index,
       city,
       street,
@@ -238,13 +241,13 @@ exports.handler = async (event) => {
         successUrl,
         failUrl,
         notificationUrl,
-        phone,
+        email,
         taxation,
         paymentMethod,
         paymentObject,
         tax,
         // Данные заказа передаём через DATA — webhook использует их как резерв
-        customerData: { fio, phone, index, city, street, room },
+        customerData: { fio, phone, email, index, city, street, room },
       });
     } catch (tbankError) {
       // INSERT прошёл, но Init упал — обновляем статус (некритично)

@@ -15,6 +15,7 @@ const boxes = {
   street: document.getElementById('box-street'),
   room:   document.getElementById('box-room'),
   phone:  document.getElementById('box-phone'),
+  email:  document.getElementById('box-email'),
 };
 
 let submitInProgress = false;
@@ -82,6 +83,7 @@ function saveFormData() {
       street: document.getElementById('street').value,
       room:   document.getElementById('room').value,
       phone:  document.getElementById('phone').value,
+      email:  document.getElementById('email').value,
       check1: check1.checked,
       check2: check2.checked,
     }));
@@ -93,7 +95,7 @@ function loadFormData() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
     const data = JSON.parse(raw);
-    ['fio', 'index', 'city', 'street', 'room', 'phone'].forEach(id => {
+    ['fio', 'index', 'city', 'street', 'room', 'phone', 'email'].forEach(id => {
       if (typeof data[id] === 'string') document.getElementById(id).value = data[id];
     });
     check1.checked = !!data.check1;
@@ -122,7 +124,7 @@ document.getElementById('index').addEventListener('input', function(e) {
   saveFormData();
 });
 
-['fio', 'city', 'street', 'room'].forEach(id => {
+['fio', 'city', 'street', 'room', 'email'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', () => { markInvalid(id, false); saveFormData(); });
 });
@@ -139,6 +141,7 @@ function validateForm() {
     city:   v => v.trim().length >= 2,
     street: v => v.trim().length >= 3,
     phone:  v => v.replace(/\D/g, '').length >= 11,
+    email:  v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim()),
   };
 
   let valid = true;
@@ -216,6 +219,7 @@ form.addEventListener('submit', async function(e) {
     street:          document.getElementById('street').value.trim(),
     room:            document.getElementById('room').value.trim(),
     phone:           document.getElementById('phone').value.trim(),
+    email:           document.getElementById('email').value.trim(),
     amount:          orderAmount,
     offerAccepted:   check1.checked,
     privacyAccepted: check2.checked,

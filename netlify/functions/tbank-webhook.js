@@ -327,7 +327,7 @@ exports.handler = async (event) => {
       }
     }
 
-    const { fio, phone, index, city, street, room } = orderData || {};
+    const { fio, phone, email, index, city, street, room } = orderData || {};
 
     let msgRu, msgEn;
 
@@ -339,11 +339,12 @@ exports.handler = async (event) => {
         '',
         `ФИО: ${fio}`,
         `Телефон: ${phone}`,
+        email ? `Email: ${email}` : null,
         `Индекс: ${index}`,
         `Город: ${city}`,
         `Адрес: ${street}${roomLineRu}`,
         `Сумма: ${amountRub.toLocaleString('ru-RU')} ₽`,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
       // ── Английский блок (1:1 с исходным форматом) ──────────────────
       const streetEn   = capitalizeWords(translit(cleanAddressForEn(street)));
