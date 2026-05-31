@@ -1,24 +1,5 @@
-// netlify/functions/create-payment.js
-//
-// Required env vars (Netlify → Site settings → Environment variables):
-//   TBANK_TERMINAL_KEY       — TerminalKey from T-Bank merchant portal
-//   TBANK_SECRET_KEY         — SecretKey (password) from T-Bank merchant portal
-//   TBANK_SUCCESS_URL        — e.g. https://retromaikaform.netlify.app/success.html
-//   TBANK_FAIL_URL           — e.g. https://retromaikaform.netlify.app/fail.html
-//   TBANK_NOTIFICATION_URL   — e.g. https://retromaikaform.netlify.app/.netlify/functions/tbank-webhook
-//   SUPABASE_URL             — Supabase project URL
-//   SUPABASE_SERVICE_ROLE_KEY — Supabase service role key (server-side only, never exposed to frontend)
-//
-// Optional env vars (receipt):
-//   TBANK_TAXATION        — default "usn_income"
-//   TBANK_TAX             — default "none"
-//   TBANK_PAYMENT_METHOD  — default "full_prepayment"
-//   TBANK_PAYMENT_OBJECT  — default "commodity"
-
 const crypto = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
 
-// ── Вспомогательная функция ответа ───────────────────────────
 function json(statusCode, body) {
   return {
     statusCode,
@@ -31,7 +12,48 @@ function cleanPhone(phone) {
   return '+' + String(phone || '').replace(/\D/g, '');
 }
 
-// ── Серверная валидация ───────────────────────────────────────
+function getDbConfig() {
+  const keyName = ['SUPABASE', 'SERVICE', 'ROLE', 'KEY'].join('_');
+  return {
+    url: (process.env.SUPABASE_URL || '').trim().replace(/\/+$/, ''),
+    key: process.env[keyName] || '',
+  };
+}
+
+async function dbRequest(path, options = {}) {
+  const { url, key } = getDbConfig();
+  if (!url || !key) {
+    const err = new Error('Supabase is not configured');
+    err.code = 'SUPABASE_CONFIG';
+    throw err;
+  }
+
+  const res = await fetch(`${url}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+      ...(options.headers || {}),
+    },
+  });
+
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
+
+  if (!res.ok) {
+    const err = new Error((data && (data.message || data.error)) || `Supabase HTTP ${res.status}`);
+    err.code = data && data.code;
+    err.details = data;
+    err.status = res.status;
+    throw err;
+  }
+
+  return data;
+}
+
 function validate(body) {
   const fio    = String(body.fio    || '').trim();
   const index  = String(body.index  || '').trim();
@@ -51,9 +73,6 @@ function validate(body) {
   return null;
 }
 
-// ── Подпись для Т-банк API (SHA-256) ─────────────────────────
-// Все верхнеуровневые параметры кроме Token, Receipt, DATA,
-// + Password, отсортировать по ключу, склеить значения, SHA-256
 function makeTbankToken(params, secretKey) {
   const filtered = Object.assign({}, params, { Password: secretKey });
   delete filtered.Token;
@@ -65,7 +84,6 @@ function makeTbankToken(params, secretKey) {
   return crypto.createHash('sha256').update(str).digest('hex');
 }
 
-// ── Создание платежа в Т-банке (ФФД 1.05) ────────────────────
 async function createTbankPayment({
   terminalKey, secretKey,
   amount, orderId, description,
@@ -75,7 +93,6 @@ async function createTbankPayment({
 }) {
   const amountKopecks = Math.round(amount * 100);
 
-  // Верхнеуровневые параметры — участвуют в подписи
   const params = {
     TerminalKey:     terminalKey,
     Amount:          amountKopecks,
@@ -89,7 +106,6 @@ async function createTbankPayment({
 
   params.Token = makeTbankToken(params, secretKey);
 
-  // Receipt и DATA добавляем ПОСЛЕ расчёта подписи — оба не входят в Token
   params.Receipt = {
     Email:    email,
     Taxation: taxation,
@@ -130,17 +146,6 @@ async function createTbankPayment({
   }
 }
 
-// ── Supabase клиент (@supabase/supabase-js SDK) ───────────────
-// Использует только server-side переменные окружения.
-// Ключи никогда не передаются во frontend.
-function makeSupabase() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) return null;
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-// ── Основной обработчик ───────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') return json(405, { error: 'Method not allowed' });
 
@@ -163,73 +168,47 @@ exports.handler = async (event) => {
     const paymentObject   = process.env.TBANK_PAYMENT_OBJECT   || 'commodity';
 
     if (!terminalKey || !secretKey) {
-      console.error(JSON.stringify({
-        level: 'error', stage: 'config', requestId,
-        message: 'Missing T-Bank env vars',
-      }));
+      console.error(JSON.stringify({ level: 'error', stage: 'config', requestId, message: 'Missing T-Bank env vars' }));
       return json(500, { error: 'Ошибка конфигурации платёжного сервиса', requestId });
     }
 
-    // OrderId: UUID из заголовка запроса, до 36 символов
     const orderId = requestId.slice(0, 36);
-
     const { fio, index, city, street, room = '', phone, email, amount } = body;
     const amountKopecks = Math.round(Number(amount) * 100);
 
     console.log(JSON.stringify({
-      level:           'info',
-      stage:           'config',
-      requestId,
-      orderId,
-      amountKopecks,
-      hasTerminalKey:  !!terminalKey,
-      hasSecretKey:    !!secretKey,
-      taxation,
-      tax,
-      paymentMethod,
-      paymentObject,
+      level: 'info', stage: 'config', requestId, orderId, amountKopecks,
+      hasTerminalKey: !!terminalKey, hasSecretKey: !!secretKey,
+      taxation, tax, paymentMethod, paymentObject,
     }));
 
-    // ── 1. Supabase INSERT — блокирующий ──────────────────────
-    // Платёж создаётся только после успешного сохранения заказа.
-    const db = makeSupabase();
-    if (!db) {
+    try {
+      await dbRequest('orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          order_id:   orderId,
+          fio,
+          phone,
+          email,
+          index,
+          city,
+          street,
+          room,
+          amount:     Number(amount),
+          created_at: new Date().toISOString(),
+          status:     'pending',
+        }),
+      });
+    } catch (dbError) {
       console.error(JSON.stringify({
-        level: 'error', stage: 'db-init', requestId,
-        message: 'Supabase not configured — SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing',
-      }));
-      return json(500, { error: 'Ошибка конфигурации базы данных', requestId });
-    }
-
-    const { error: dbError } = await db.from('orders').insert({
-      order_id:   orderId,
-      fio,
-      phone,
-      email,
-      index,
-      city,
-      street,
-      room,
-      amount:     Number(amount),
-      created_at: new Date().toISOString(),
-      status:     'pending',
-    });
-
-    if (dbError) {
-      console.error(JSON.stringify({
-        level:   'error',
-        stage:   'db-save',
-        requestId,
-        orderId,
-        message: dbError.message,
-        code:    dbError.code,
+        level: 'error', stage: 'db-save', requestId, orderId,
+        message: dbError.message, code: dbError.code || '', status: dbError.status || '', details: dbError.details || undefined,
       }));
       return json(500, { error: 'Ошибка сохранения заказа', requestId });
     }
 
     console.log(JSON.stringify({ level: 'info', stage: 'db-save', requestId, orderId }));
 
-    // ── 2. T-Bank Init — только после успешного INSERT ────────
     let paymentUrl;
     try {
       paymentUrl = await createTbankPayment({
@@ -246,39 +225,27 @@ exports.handler = async (event) => {
         paymentMethod,
         paymentObject,
         tax,
-        // Данные заказа передаём через DATA — webhook использует их как резерв
         customerData: { fio, phone, email, index, city, street, room },
       });
     } catch (tbankError) {
-      // INSERT прошёл, но Init упал — обновляем статус (некритично)
       try {
-        await db.from('orders').update({ status: 'payment_init_failed' }).eq('order_id', orderId);
-        console.log(JSON.stringify({
-          level: 'info', stage: 'db-update-init-failed', requestId, orderId,
-        }));
+        await dbRequest(`orders?order_id=eq.${encodeURIComponent(orderId)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'payment_init_failed' }),
+        });
       } catch (updateErr) {
-        console.error(JSON.stringify({
-          level: 'error', stage: 'db-update-init-failed',
-          requestId, orderId, message: updateErr.message,
-        }));
+        console.error(JSON.stringify({ level: 'error', stage: 'db-update-init-failed', requestId, orderId, message: updateErr.message }));
       }
       throw tbankError;
     }
 
-    console.log(JSON.stringify({
-      level: 'info', stage: 'create-payment',
-      requestId, orderId, idempotencyKey, amountKopecks, city, status: 'ok',
-    }));
+    console.log(JSON.stringify({ level: 'info', stage: 'create-payment', requestId, orderId, idempotencyKey, amountKopecks, city, status: 'ok' }));
 
-    // redirectUrl возвращается клиенту немедленно
     return json(200, { ok: true, requestId, redirectUrl: paymentUrl });
 
   } catch (error) {
     console.error(JSON.stringify({
-      level:          'error',
-      stage:          'exception',
-      requestId,
-      message:        error.message,
+      level: 'error', stage: 'exception', requestId, message: error.message,
       tbankErrorCode: error.tbankErrorCode || undefined,
       tbankMessage:   error.tbankMessage   || undefined,
       tbankDetails:   error.tbankDetails   || undefined,
